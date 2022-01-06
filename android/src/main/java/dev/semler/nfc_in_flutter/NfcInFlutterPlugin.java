@@ -3,6 +3,9 @@ package dev.semler.nfc_in_flutter;
 import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.Context;
+import android.content.BroadcastReceiver;
 import android.nfc.FormatException;
 import android.nfc.NdefMessage;
 import android.nfc.NdefRecord;
@@ -41,7 +44,6 @@ import io.flutter.plugin.common.PluginRegistry.Registrar;
  */
 public class NfcInFlutterPlugin implements MethodCallHandler,
         EventChannel.StreamHandler,
-        PluginRegistry.NewIntentListener,
         NfcAdapter.ReaderCallback {
 
     private static final String NORMAL_READER_MODE = "normal";
@@ -56,6 +58,20 @@ public class NfcInFlutterPlugin implements MethodCallHandler,
     private String currentReaderMode = null;
     private Tag lastTag = null;
 
+
+    private NFCReceiver receiver = new NFCReceiver() {
+        @java.lang.Override
+        void onTagReceived(String rawPayload) {
+            final Map<String, Object> result = new HashMap<>();
+            List<Map<String, Object>> records = new ArrayList<>();
+            Map<String, Object> recordMap = new HashMap<>();
+            recordMap.put("rawPayload", rawPayload);
+            records.add(recordMap);
+            result.put("records", records);
+            eventSuccess(result);
+        }
+    };
+
     /**
      * Plugin registration.
      */
@@ -63,7 +79,6 @@ public class NfcInFlutterPlugin implements MethodCallHandler,
         final MethodChannel channel = new MethodChannel(registrar.messenger(), "nfc_in_flutter");
         final EventChannel tagChannel = new EventChannel(registrar.messenger(), "nfc_in_flutter/tags");
         NfcInFlutterPlugin plugin = new NfcInFlutterPlugin(registrar.activity());
-        registrar.addNewIntentListener(plugin);
         channel.setMethodCallHandler(plugin);
         tagChannel.setStreamHandler(plugin);
     }
@@ -152,16 +167,10 @@ public class NfcInFlutterPlugin implements MethodCallHandler,
         adapter.enableReaderMode(activity, this, flags, bundle);
     }
 
+    // Dispatch is already setup in our mainactivity. we subscribe here to a broadcast that will
+    // be sent
     private void startReadingWithForegroundDispatch() {
-        adapter = NfcAdapter.getDefaultAdapter(activity);
-        if (adapter == null) return;
-        Intent intent = new Intent(activity.getApplicationContext(), activity.getClass());
-        intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-
-        PendingIntent pendingIntent = PendingIntent.getActivity(activity.getApplicationContext(), 0, intent, 0);
-        String[][] techList = new String[][]{};
-
-        adapter.enableForegroundDispatch(activity, pendingIntent, null, techList);
+        receiver.register(activity);
     }
 
     @Override
@@ -177,7 +186,7 @@ public class NfcInFlutterPlugin implements MethodCallHandler,
                     adapter.disableReaderMode(activity);
                     break;
                 case DISPATCH_READER_MODE:
-                    adapter.disableForegroundDispatch(activity);
+                    receiver.unregister(activity);
                     break;
                 default:
                     Log.e(LOG_TAG, "unknown reader mode: " + currentReaderMode);
@@ -226,18 +235,6 @@ public class NfcInFlutterPlugin implements MethodCallHandler,
         } else if (formatable != null) {
             eventSuccess(formatEmptyWritableNDEFMessage());
         }
-    }
-
-    @Override
-    public boolean onNewIntent(Intent intent) {
-        String action = intent.getAction();
-        if (NfcAdapter.ACTION_NDEF_DISCOVERED.equals(action)) {
-            Tag tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
-            lastTag = tag;
-            handleNDEFTagFromIntent(tag);
-            return true;
-        }
-        return false;
     }
 
     private String getNDEFTagID(Ndef ndef) {
@@ -673,5 +670,29 @@ public class NfcInFlutterPlugin implements MethodCallHandler,
             }
         };
         mainThread.post(runnable);
+    }
+}
+
+abstract class NFCReceiver extends BroadcastReceiver {
+
+    public static final String RECEIVER_URI = "NFC_RECEIVER_FL";
+    public static final String RAW_PAYLOAD = "RAW_PAYLOAD";
+
+    @Override
+    public void onReceive(Context context, Intent intent) {
+        final String rawPayload = intent.getStringExtra(RAW_PAYLOAD);
+        if (rawPayload != null) {
+            onTagReceived(rawPayload);
+        }
+    }
+
+    abstract void onTagReceived(String rawPayload);
+
+    public void register(Context context) {
+        context.registerReceiver(this, new IntentFilter(RECEIVER_URI));
+    }
+
+    public void unregister(Context context) {
+        context.unregisterReceiver(this);
     }
 }
